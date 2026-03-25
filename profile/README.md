@@ -1,10 +1,14 @@
 <div align="center">
 
-<img src="https://smpl-os.github.io/images/logo.png" alt="smplOS" height="72">
+<img src="https://smpl-os.github.io/images/og-preview.png" alt="smplOS" width="720">
 
-# smpl-os
+<br><br>
 
-**A simple OS that just works.**
+<img src="https://smpl-os.github.io/images/favicon.png" alt="" height="40">
+
+# smplOS — the OS that gets out of your way.
+
+**Power without the noise. Simplicity without the compromise.**
 
 Minimal Arch Linux · Hyprland & DWM · Offline install in under 2 min · < 800 MB RAM
 

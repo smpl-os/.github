@@ -1,9 +1,5 @@
 <div align="center">
 
-<img src="https://smpl-os.github.io/images/og-preview.png" alt="smplOS" width="720">
-
-<br><br>
-
 <img src="https://smpl-os.github.io/images/favicon.png" alt="" height="40">
 
 # smplOS — the OS that gets out of your way.

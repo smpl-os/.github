@@ -1,0 +1,176 @@
+# Shared reusable workflow: auto-bump patch version, commit, tag, and output
+# the new version for the caller to use in its build/release steps.
+#
+# Usage from any smpl-os repo:
+#
+#   jobs:
+#     bump:
+#       uses: smpl-os/.github/.github/workflows/auto-release.yml@main
+#       with:
+#         version-file: meson.build          # or Cargo.toml, config.mk, VERSION, git-tag
+#       secrets: inherit
+#
+#     build:
+#       needs: bump
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@v4
+#           with: { ref: ${{ needs.bump.outputs.sha }} }
+#         # ... build using needs.bump.outputs.new-version ...
+#
+# Supported version-file values:
+#   meson.build  — project('...', version : 'X.Y.Z')
+#   Cargo.toml   — [workspace.package] version = "X.Y.Z"
+#   config.mk    — VERSION = X.Y.Z
+#   VERSION      — plain text file containing X.Y.Z
+#   git-tag      — version derived from latest vX.Y.Z tag (no file to edit)
+
+name: Auto Version Bump
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        description: "Which file holds the version (meson.build, Cargo.toml, config.mk, VERSION, git-tag)"
+        required: true
+        type: string
+      branch:
+        description: "Branch to push the bump commit to"
+        required: false
+        type: string
+        default: ""
+    outputs:
+      new-version:
+        description: "The bumped version string (e.g. 1.4.12)"
+        value: ${{ jobs.bump.outputs.new-version }}
+      tag:
+        description: "The git tag (e.g. v1.4.12)"
+        value: ${{ jobs.bump.outputs.tag }}
+      sha:
+        description: "The SHA of the bump commit (or HEAD for git-tag mode)"
+        value: ${{ jobs.bump.outputs.sha }}
+      skipped:
+        description: "'true' if the last commit was already a version bump (prevents loops)"
+        value: ${{ jobs.bump.outputs.skipped }}
+
+jobs:
+  bump:
+    name: Bump version
+    runs-on: ubuntu-latest
+    outputs:
+      new-version: ${{ steps.bump.outputs.new-version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      sha: ${{ steps.bump.outputs.sha }}
+      skipped: ${{ steps.bump.outputs.skipped }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.branch || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Skip if last commit was a version bump
+        id: guard
+        run: |
+          msg=$(git log -1 --format='%s')
+          if echo "$msg" | grep -qE '^chore: (bump version|release v)'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version
+        id: bump
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+
+          FILE="${{ inputs.version-file }}"
+
+          bump_semver() {
+            local cur="$1"
+            local major minor patch
+            major=$(echo "$cur" | cut -d. -f1)
+            minor=$(echo "$cur" | cut -d. -f2)
+            patch=$(echo "$cur" | cut -d. -f3)
+            echo "${major}.${minor}.$((patch + 1))"
+          }
+
+          case "$FILE" in
+            meson.build)
+              CUR=$(grep -Po "version\s*:\s*'\K[^']+" meson.build | head -1)
+              NEW=$(bump_semver "$CUR")
+              sed -i "s/version : '$CUR'/version : '$NEW'/" meson.build
+              git add meson.build
+              ;;
+            Cargo.toml)
+              CUR=$(grep -m1 '^version\s*=' Cargo.toml | grep -oP '\d+\.\d+\.\d+')
+              NEW=$(bump_semver "$CUR")
+              sed -i "0,/^version\s*=\s*\"${CUR}\"/s//version    = \"${NEW}\"/" Cargo.toml
+              # Update Cargo.lock if it exists
+              if [ -f Cargo.lock ]; then
+                git add Cargo.lock 2>/dev/null || true
+              fi
+              git add Cargo.toml
+              ;;
+            config.mk)
+              CUR=$(grep -oP '^VERSION\s*=\s*\K[\d.]+' config.mk)
+              NEW=$(bump_semver "$CUR")
+              sed -i "s/^VERSION\s*=\s*${CUR}/VERSION = ${NEW}/" config.mk
+              git add config.mk
+              ;;
+            VERSION|src/VERSION)
+              CUR=$(cat "$FILE" | tr -d '[:space:]')
+              NEW=$(bump_semver "$CUR")
+              echo "$NEW" > "$FILE"
+              git add "$FILE"
+              ;;
+            git-tag)
+              # No file to edit — derive version from latest tag
+              CUR=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+              NEW=$(bump_semver "$CUR")
+              ;;
+            *)
+              echo "::error::Unknown version-file type: $FILE"
+              exit 1
+              ;;
+          esac
+
+          echo "Bumped $CUR -> $NEW"
+
+          if [ "$FILE" != "git-tag" ]; then
+            git commit -m "chore: bump version to $NEW"
+            BRANCH="${{ inputs.branch || github.ref_name }}"
+            git push origin HEAD:"$BRANCH"
+          fi
+
+          # Create lightweight tag via GitHub API (avoids GITHUB_TOKEN workflows permission issue)
+          SHA=$(git rev-parse HEAD)
+          TAG="v${NEW}"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs" \
+            -d "{\"ref\":\"refs/tags/${TAG}\",\"sha\":\"${SHA}\"}"
+
+          echo "new-version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"         >> "$GITHUB_OUTPUT"
+          echo "skipped=false"    >> "$GITHUB_OUTPUT"
+
+      - name: Mark skipped
+        if: steps.guard.outputs.skip == 'true'
+        id: mark-skip
+        run: |
+          echo "skipped=true"    >> "$GITHUB_OUTPUT"
+          echo "new-version="    >> "$GITHUB_OUTPUT"
+          echo "tag="            >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Skipping — last commit was already a version bump"

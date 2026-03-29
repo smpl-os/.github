@@ -160,11 +160,16 @@ jobs:
           SHA=$(git rev-parse HEAD)
           TAG="v${NEW}"
 
-          curl -fsSL -X POST \
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases" \
-            -d "{\"tag_name\":\"${TAG}\",\"target_commitish\":\"${SHA}\",\"name\":\"${TAG}\",\"generate_release_notes\":true}"
+            -d "{\"tag_name\":\"${TAG}\",\"target_commitish\":\"${SHA}\",\"name\":\"${TAG}\",\"generate_release_notes\":true}")
+          if [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "422" ]; then
+            echo "::error::Failed to create release (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "Release API: HTTP $HTTP_STATUS (201=created, 422=already exists — OK)"
 
           echo "new-version=$NEW" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"

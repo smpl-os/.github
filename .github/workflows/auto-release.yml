@@ -58,10 +58,10 @@ jobs:
     name: Bump version
     runs-on: ubuntu-latest
     outputs:
-      new-version: ${{ steps.bump.outputs.new-version }}
-      tag: ${{ steps.bump.outputs.tag }}
-      sha: ${{ steps.bump.outputs.sha }}
-      skipped: ${{ steps.bump.outputs.skipped }}
+      new-version: ${{ steps.bump.outputs.new-version || steps.mark-skip.outputs.new-version }}
+      tag: ${{ steps.bump.outputs.tag || steps.mark-skip.outputs.tag }}
+      sha: ${{ steps.bump.outputs.sha || steps.mark-skip.outputs.sha }}
+      skipped: ${{ steps.bump.outputs.skipped || steps.mark-skip.outputs.skipped }}
 
     steps:
       - uses: actions/checkout@v4
@@ -154,15 +154,17 @@ jobs:
             git push origin HEAD:"$BRANCH"
           fi
 
-          # Create lightweight tag via GitHub API (avoids GITHUB_TOKEN workflows permission issue)
+          # Create GitHub Release (also creates the tag) via REST API
+          # softprops/action-gh-release in downstream build jobs will UPDATE
+          # this release and attach artifacts.
           SHA=$(git rev-parse HEAD)
           TAG="v${NEW}"
 
           curl -fsSL -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/git/refs" \
-            -d "{\"ref\":\"refs/tags/${TAG}\",\"sha\":\"${SHA}\"}"
+            "https://api.github.com/repos/${{ github.repository }}/releases" \
+            -d "{\"tag_name\":\"${TAG}\",\"target_commitish\":\"${SHA}\",\"name\":\"${TAG}\",\"generate_release_notes\":true}"
 
           echo "new-version=$NEW" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"

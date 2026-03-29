@@ -95,10 +95,12 @@ jobs:
 
           bump_semver() {
             local cur="$1"
+            # Strip any pre-release suffix (e.g. 2.0.15-smpl.1 -> 2.0.15)
+            local base=$(echo "$cur" | sed 's/[-+].*//')
             local major minor patch
-            major=$(echo "$cur" | cut -d. -f1)
-            minor=$(echo "$cur" | cut -d. -f2)
-            patch=$(echo "$cur" | cut -d. -f3)
+            major=$(echo "$base" | cut -d. -f1)
+            minor=$(echo "$base" | cut -d. -f2)
+            patch=$(echo "$base" | cut -d. -f3)
             echo "${major}.${minor}.$((patch + 1))"
           }
 
@@ -147,6 +149,8 @@ jobs:
           if [ "$FILE" != "git-tag" ]; then
             git commit -m "chore: bump version to $NEW"
             BRANCH="${{ inputs.branch || github.ref_name }}"
+            # Pull first in case another workflow already pushed (race condition)
+            git pull --rebase origin "$BRANCH" 2>/dev/null || true
             git push origin HEAD:"$BRANCH"
           fi
 

@@ -160,16 +160,62 @@ jobs:
           SHA=$(git rev-parse HEAD)
           TAG="v${NEW}"
 
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases" \
-            -d "{\"tag_name\":\"${TAG}\",\"target_commitish\":\"${SHA}\",\"name\":\"${TAG}\",\"generate_release_notes\":true}")
-          if [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "422" ]; then
-            echo "::error::Failed to create release (HTTP $HTTP_STATUS)"
-            exit 1
-          fi
-          echo "Release API: HTTP $HTTP_STATUS (201=created, 422=already exists — OK)"
+          # Retry with exponential backoff to survive transient GitHub API
+          # outages (5xx). Treat 201 (created) and 422 (tag already exists)
+          # as success — 422 lets us re-run the workflow idempotently if a
+          # partial failure left the tag in place.
+          RELEASE_BODY=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","generate_release_notes":true}' \
+            "$TAG" "$SHA" "$TAG")
+
+          attempt=0
+          max_attempts=6
+          delay=5
+          http_code=""
+          while [ "$attempt" -lt "$max_attempts" ]; do
+            attempt=$((attempt + 1))
+            if ! http_code=$(curl -sS -o /tmp/release-resp.json -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${{ github.repository }}/releases" \
+                -d "$RELEASE_BODY"); then
+              # curl itself failed (network / DNS / TLS). Treat as retryable.
+              http_code="000"
+            fi
+            echo "Release POST attempt ${attempt}/${max_attempts}: HTTP ${http_code}"
+
+            case "$http_code" in
+              201)
+                echo "Release ${TAG} created."
+                break
+                ;;
+              422)
+                # Tag already exists — release row may or may not; treat as
+                # success to keep the workflow idempotent. Log body for context.
+                echo "HTTP 422 — tag likely already exists, treating as success:"
+                cat /tmp/release-resp.json || true
+                echo
+                break
+                ;;
+              5??|000|429)
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "::error::Release POST failed after ${max_attempts} attempts (last HTTP ${http_code})"
+                  cat /tmp/release-resp.json || true
+                  exit 1
+                fi
+                echo "Transient failure (HTTP ${http_code}); sleeping ${delay}s before retry"
+                sleep "$delay"
+                # Exponential backoff, capped at 60s
+                delay=$((delay * 2))
+                if [ "$delay" -gt 60 ]; then delay=60; fi
+                ;;
+              *)
+                echo "::error::Release POST failed with non-retryable HTTP ${http_code}"
+                cat /tmp/release-resp.json || true
+                exit 1
+                ;;
+            esac
+          done
 
           echo "new-version=$NEW" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
